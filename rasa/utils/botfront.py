@@ -1,18 +1,18 @@
 import os
 import yaml
 import logging
-import requests
 import asyncio
 import time
 import tempfile
-from rasa.utils.common import set_log_level
-from asyncio import CancelledError
-from typing import Text, Dict, Union
-from rasa.core.events import UserUttered, BotUttered, SlotSet
+from rasa.telemetry import TELEMETRY_ENABLED_ENVIRONMENT_VARIABLE
 
 logger = logging.getLogger(__name__)
 
 from rasa.core.constants import DEFAULT_REQUEST_TIMEOUT
+
+# hard code false here, since a number of things must be done to
+# add support with BF
+os.environ[TELEMETRY_ENABLED_ENVIRONMENT_VARIABLE] = "false"
 
 CONFIG_QUERY = """
 query($projectId: String!, $environment: String) {

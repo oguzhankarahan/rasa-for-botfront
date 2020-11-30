@@ -1,6 +1,7 @@
 from typing import Text, Dict, Any, Optional
-from rasa.core.trackers import DialogueStateTracker
-from rasa.core.interpreter import NaturalLanguageInterpreter
+import rasa.core.interpreter
+from rasa.shared.core.trackers import DialogueStateTracker
+from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
 
 
 class MultilingualNLUInterpreter(NaturalLanguageInterpreter):
@@ -13,7 +14,7 @@ class MultilingualNLUInterpreter(NaturalLanguageInterpreter):
         self.lazy_init = lazy_init
         self.config_file = config_file
         self.interpreters = {
-            lang: NaturalLanguageInterpreter.create(model_path)
+            lang: rasa.core.interpreter.create_interpreter(model_path)
             for lang, model_path in model_directory.items()
         }
 

@@ -5,7 +5,8 @@ from typing import Any, Text, Dict, Optional, List
 
 from rasa.nlu.components import Component
 from rasa.nlu.config import RasaNLUModelConfig
-from rasa.nlu.training_data import Message, TrainingData
+from rasa.shared.nlu.training_data.message import Message
+from rasa.shared.nlu.training_data.training_data import TrainingData
 from rasa.nlu.model import Metadata
 
 
@@ -34,6 +35,8 @@ class IntentRankingCanonicalExampleInjector(Component):
         return frozenset((e.get("entity"), e.get("value")) for e in entities)
 
     def generate_canonicals(self, nlu_data):
+        # could be done by inspecting metadata of items, but here
+        # canonical-first order is assumed
         canonicals = {}
         for datum in nlu_data:
             intent, text, entities = (

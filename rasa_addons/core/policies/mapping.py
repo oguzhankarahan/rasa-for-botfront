@@ -5,18 +5,19 @@ import re
 import copy
 from typing import Any, List, Text, Dict
 
-import rasa.utils.io
+import rasa.shared.utils.io
 
 from rasa.core.actions.action import (
     ACTION_BACK_NAME,
     ACTION_LISTEN_NAME,
     ACTION_RESTART_NAME,
 )
-from rasa.core.constants import USER_INTENT_BACK, USER_INTENT_RESTART
-from rasa.core.domain import Domain
-from rasa.core.events import ActionExecuted
+from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
+from rasa.shared.core.constants import USER_INTENT_BACK, USER_INTENT_RESTART
+from rasa.shared.core.domain import Domain
+from rasa.shared.core.events import ActionExecuted
 from rasa.core.policies.policy import Policy
-from rasa.core.trackers import DialogueStateTracker
+from rasa.shared.core.trackers import DialogueStateTracker
 from rasa.core.constants import MAPPING_POLICY_PRIORITY
 
 logger = logging.getLogger(__name__)
@@ -53,14 +54,17 @@ class BotfrontMappingPolicy(Policy):
         self,
         training_trackers: List[DialogueStateTracker],
         domain: Domain,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         """Does nothing. This policy is deterministic."""
 
         pass
 
     def predict_action_probabilities(
-        self, tracker: DialogueStateTracker, domain: Domain
+        self,
+        tracker: DialogueStateTracker,
+        domain: Domain,
+        interpreter: NaturalLanguageInterpreter,
     ) -> List[float]:
         logger.debug("Triggers: " + ", ".join(self.triggers.keys()))
         """Predicts the assigned action.
@@ -118,8 +122,8 @@ class BotfrontMappingPolicy(Policy):
 
         config_file = os.path.join(path, "botfront_mapping_policy.json")
         meta = {"priority": self.priority, "triggers": self.triggers}
-        rasa.utils.io.create_directory_for_file(config_file)
-        rasa.utils.io.dump_obj_as_json_to_file(config_file, meta)
+        rasa.shared.utils.io.create_directory_for_file(config_file)
+        rasa.shared.utils.io.dump_obj_as_json_to_file(config_file, meta)
 
     @classmethod
     def load(cls, path: Text) -> "BotfrontMappingPolicy":
@@ -129,6 +133,6 @@ class BotfrontMappingPolicy(Policy):
         if os.path.exists(path):
             meta_path = os.path.join(path, "botfront_mapping_policy.json")
             if os.path.isfile(meta_path):
-                meta = json.loads(rasa.utils.io.read_file(meta_path))
+                meta = json.loads(rasa.shared.utils.io.read_file(meta_path))
 
         return cls(**meta)

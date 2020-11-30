@@ -1,6 +1,9 @@
 import logging
 import functools
-from typing import Dict, Text, Any, List, Union, Optional, Tuple
+from typing import Dict, Text, Any, List, Optional
+from rasa_addons.core.actions.required_slots_graph_parser import (
+    RequiredSlotsGraphParser,
+)
 from rasa_addons.core.actions.slot_rule_validator import validate_with_rule
 from rasa_addons.core.actions.submit_form_to_botfront import submit_form_to_botfront
 
@@ -9,8 +12,8 @@ from rasa.core.actions.action import (
     ActionExecutionRejection,
     create_bot_utterance,
 )
-from rasa.core.events import Event, Form, SlotSet
-from rasa.core.constants import REQUESTED_SLOT
+from rasa.shared.core.events import Event, ActiveLoop, SlotSet
+from rasa.shared.core.constants import REQUESTED_SLOT
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,12 @@ class ActionBotfrontForm(Action):
         return f"FormAction('{self.name()}')"
 
     def required_slots(self, tracker):
-        return [s.get("name") for s in self.form_spec.get("slots", [])]
+        graph = self.form_spec.get("graph_elements")
+        if not graph:
+            return [s.get("name") for s in self.form_spec.get("slots", [])]
+        parser = RequiredSlotsGraphParser(graph)
+        required_slots = parser.get_required_slots(tracker)
+        return required_slots
 
     def get_field_for_slot(
         self, slot: Text, field: Text, default: Optional[Any] = None,
@@ -50,32 +58,6 @@ class ActionBotfrontForm(Action):
             if s.get("name") == slot:
                 return s.get(field, default)
         return default
-
-    async def validate_prefilled(
-        self,
-        output_channel: "OutputChannel",
-        nlg: "NaturalLanguageGenerator",
-        tracker: "DialogueStateTracker",
-        domain: "Domain",
-    ):
-        # collect values of required slots filled before activation
-        prefilled_slots = {}
-        events = []
-
-        for slot_name in self.required_slots(tracker):
-            if not self._should_request_slot(tracker, slot_name):
-                prefilled_slots[slot_name] = tracker.get_slot(slot_name)
-
-        if prefilled_slots:
-            logger.debug(f"Validating pre-filled required slots: {prefilled_slots}")
-            events.extend(
-                await self.validate_slots(
-                    prefilled_slots, output_channel, nlg, tracker, domain
-                )
-            )
-        else:
-            logger.debug("No pre-filled required slots to validate.")
-        return events
 
     async def run(
         self,
@@ -86,14 +68,12 @@ class ActionBotfrontForm(Action):
     ) -> List[Event]:
         # attempt retrieving spec
         if not len(self.form_spec):
-            for form in tracker.slots.get("bf_forms", {}).initial_value:
-                if form.get("name") == self.name():
-                    self.form_spec = clean_none_values(form)
+            self.form_spec = clean_none_values(domain.slot_mapping_for_form(self.name()))
             if not len(self.form_spec):
                 logger.debug(
-                    f"Could not retrieve form '{tracker.active_form}', there is something wrong with your domain."
+                    f"Could not retrieve form '{tracker.active_loop}', there is something wrong with your domain."
                 )
-                return [Form(None)]
+                return [ActiveLoop(None)]
 
         # activate the form
         events = await self._activate_if_required(output_channel, nlg, tracker, domain)
@@ -102,7 +82,7 @@ class ActionBotfrontForm(Action):
             await self._validate_if_required(output_channel, nlg, tracker, domain)
         )
         # check that the form wasn't deactivated in validation
-        if Form(None) not in events:
+        if ActiveLoop(None) not in events:
 
             # create temp tracker with populated slots from `validate` method
             temp_tracker = tracker.copy()
@@ -117,11 +97,7 @@ class ActionBotfrontForm(Action):
                 output_channel, nlg, temp_tracker, domain
             )
 
-            if next_slot_events is not None:
-                # request next slot
-                events.extend(next_slot_events)
-            else:
-                # there is nothing more to request, so we can submit
+            async def prepare_submit_and_submit():
                 self._log_form_slots(temp_tracker)
                 logger.debug(f"Submitting the form '{self.name()}'")
                 events.extend(
@@ -130,11 +106,21 @@ class ActionBotfrontForm(Action):
                 # deactivate the form after submission
                 events.extend(self.deactivate())
 
+            if next_slot_events is not None:
+                # request next slot
+                events.extend(next_slot_events)
+                if len(next_slot_events) == 1 and type(next_slot_events[0]) is SlotSet:
+                    # we only want to set a slot so we can submit
+                    await prepare_submit_and_submit()
+            else:
+                # there is nothing more to request, so we can submit
+                await prepare_submit_and_submit()
+
         return events
 
     def deactivate(self) -> List[Event]:
         logger.debug(f"Deactivating the form '{self.name()}'")
-        return [Form(None), SlotSet(REQUESTED_SLOT, None)]
+        return [ActiveLoop(None), SlotSet(REQUESTED_SLOT, None)]
 
     async def submit(
         self,
@@ -150,7 +136,8 @@ class ActionBotfrontForm(Action):
             template = await nlg.generate(
                 f"utter_submit_{self.name()}", tracker, output_channel.name(),
             )
-            events += [create_bot_utterance(template)]
+            if template:
+                events += [create_bot_utterance(template)]
         if collect_in_botfront:
             submit_form_to_botfront(tracker)
         return events
@@ -222,11 +209,13 @@ class ActionBotfrontForm(Action):
 
     @staticmethod
     def get_entity_value(
-        name: Text,
+        name: Optional[Text],
         tracker: "DialogueStateTracker",
         role: Optional[Text] = None,
         group: Optional[Text] = None,
     ) -> Any:
+        if not name:
+            return None
         # list is used to cover the case of list slot type
         value = list(
             tracker.get_latest_entity_values(name, entity_group=group, entity_role=role)
@@ -246,6 +235,8 @@ class ActionBotfrontForm(Action):
         domain: "Domain",
     ) -> Dict[Text, Any]:
         slot_to_fill = tracker.get_slot(REQUESTED_SLOT)
+        if not slot_to_fill:
+            return {}
 
         slot_values = {}
         for slot in self.required_slots(tracker):
@@ -264,7 +255,7 @@ class ActionBotfrontForm(Action):
                     # check whether the slot should be
                     # filled from trigger intent mapping
                     should_fill_trigger_slot = (
-                        tracker.active_form.get("name") != self.name()
+                        tracker.active_loop.get("name") != self.name()
                         and other_slot_mapping["type"] == "from_trigger_intent"
                         and self.intent_is_desired(other_slot_mapping, tracker)
                     )
@@ -300,10 +291,15 @@ class ActionBotfrontForm(Action):
             else return None
         """
         slot_to_fill = tracker.get_slot(REQUESTED_SLOT)
+        if not slot_to_fill:
+            return {}
         logger.debug(f"Trying to extract requested slot '{slot_to_fill}' ...")
 
         # get mapping for requested slot
         requested_slot_mappings = self.get_mappings_for_slot(slot_to_fill)
+
+        if len(requested_slot_mappings) == 0:
+            requested_slot_mappings = [{"type": "from_text"}]
 
         for requested_slot_mapping in requested_slot_mappings:
             logger.debug(f"Got mapping '{requested_slot_mapping}'")
@@ -352,14 +348,16 @@ class ActionBotfrontForm(Action):
             and self.get_field_for_slot(slot, "utter_on_new_valid_slot", False) is False
         ):
             return []
-        valid = "valid" if valid else "invalid"
+        utter_what = "valid" if valid else "invalid"
 
         # so utter_(in)valid_slot supports {slot} template replacements
         temp_tracker = tracker.copy()
         temp_tracker.slots[slot].value = value
         template = await nlg.generate(
-            f"utter_{valid}_{slot}", temp_tracker, output_channel.name(),
+            f"utter_{utter_what}_{slot}", temp_tracker, output_channel.name(),
         )
+        if not template:
+            return []
         return [create_bot_utterance(template)]
 
     async def validate_slots(
@@ -436,6 +434,8 @@ class ActionBotfrontForm(Action):
             else return None"""
 
         for slot in self.required_slots(tracker):
+            if type(slot) is dict:
+                return [SlotSet(slot.get("name"), slot.get("value"))]
             if self._should_request_slot(tracker, slot):
 
                 template = await nlg.generate(
@@ -449,10 +449,11 @@ class ActionBotfrontForm(Action):
 
     def _log_form_slots(self, tracker) -> None:
         """Logs the values of all required slots before submitting the form."""
+        required_slots = self._requested_slot_without_slot_set(tracker)
         slot_values = "\n".join(
             [
                 f"\t{slot}: {tracker.get_slot(slot)}"
-                for slot in self.required_slots(tracker)
+                for slot in required_slots
             ]
         )
         logger.debug(
@@ -466,16 +467,16 @@ class ActionBotfrontForm(Action):
         tracker: "DialogueStateTracker",
         domain: "Domain",
     ) -> List[Event]:
-        if tracker.active_form.get("name") is not None:
-            logger.debug(f"The form '{tracker.active_form}' is active")
+        if tracker.active_loop.get("name") is not None:
+            logger.debug(f"The form '{tracker.active_loop}' is active")
         else:
             logger.debug("There is no active form")
 
-        if tracker.active_form.get("name") == self.name():
+        if tracker.active_loop.get("name") == self.name():
             return []
         else:
             logger.debug(f"Activated the form '{self.name()}'")
-            events = [Form(self.name())]
+            events = [ActiveLoop(self.name())]
             events.extend(
                 await self.validate_prefilled(output_channel, nlg, tracker, domain)
             )
@@ -492,7 +493,9 @@ class ActionBotfrontForm(Action):
         prefilled_slots = {}
         events = []
 
-        for slot_name in self.required_slots(tracker):
+        required_slots = self._requested_slot_without_slot_set(tracker)
+
+        for slot_name in required_slots:
             if not self._should_request_slot(tracker, slot_name):
                 prefilled_slots[slot_name] = tracker.get_slot(slot_name)
 
@@ -514,7 +517,7 @@ class ActionBotfrontForm(Action):
         tracker: "DialogueStateTracker",
         domain: "Domain",
     ) -> List[Event]:
-        if tracker.latest_action_name == "action_listen" and tracker.active_form.get(
+        if tracker.latest_action_name == "action_listen" and tracker.active_loop.get(
             "validate", True
         ):
             logger.debug(f"Validating user input '{tracker.latest_message}'")
@@ -523,6 +526,10 @@ class ActionBotfrontForm(Action):
             logger.debug("Skipping validation")
             return []
 
+    def _requested_slot_without_slot_set(self, tracker: "DialogueStateTracker") -> List:
+        return filter(lambda slot: not type(slot) is dict ,self.required_slots(tracker))
+
     @staticmethod
     def _should_request_slot(tracker: "DialogueStateTracker", slot_name: Text) -> bool:
         return tracker.get_slot(slot_name) is None
+    

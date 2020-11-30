@@ -1,6 +1,6 @@
 import logging
-import tempfile
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 import sqlalchemy
@@ -10,6 +10,7 @@ from _pytest.capture import CaptureFixture
 from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 from moto import mock_dynamodb2
+from rasa.shared.constants import DEFAULT_SENDER_ID
 from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.dialects.sqlite.base import SQLiteDialect
 from sqlalchemy.dialects.oracle.base import OracleDialect
@@ -18,11 +19,10 @@ from typing import Tuple, Text, Type, Dict, List, Union, Optional, ContextManage
 from unittest.mock import Mock
 
 import rasa.core.tracker_store
-from rasa.core.actions.action import ACTION_LISTEN_NAME, ACTION_SESSION_START_NAME
-from rasa.core.channels.channel import UserMessage
+from rasa.shared.core.constants import ACTION_LISTEN_NAME, ACTION_SESSION_START_NAME
 from rasa.core.constants import POSTGRESQL_SCHEMA
-from rasa.core.domain import Domain
-from rasa.core.events import (
+from rasa.shared.core.domain import Domain
+from rasa.shared.core.events import (
     SlotSet,
     ActionExecuted,
     Restarted,
@@ -39,7 +39,7 @@ from rasa.core.tracker_store import (
     DynamoTrackerStore,
     FailSafeTrackerStore,
 )
-from rasa.core.trackers import DialogueStateTracker
+from rasa.shared.core.trackers import DialogueStateTracker
 from rasa.utils.endpoints import EndpointConfig, read_endpoint_config
 from tests.core.conftest import DEFAULT_ENDPOINTS_FILE, MockedMongoTrackerStore
 
@@ -50,14 +50,14 @@ def get_or_create_tracker_store(store: TrackerStore) -> None:
     slot_key = "location"
     slot_val = "Easter Island"
 
-    tracker = store.get_or_create_tracker(UserMessage.DEFAULT_SENDER_ID)
+    tracker = store.get_or_create_tracker(DEFAULT_SENDER_ID)
     ev = SlotSet(slot_key, slot_val)
     tracker.update(ev)
     assert tracker.get_slot(slot_key) == slot_val
 
     store.save(tracker)
 
-    again = store.get_or_create_tracker(UserMessage.DEFAULT_SENDER_ID)
+    again = store.get_or_create_tracker(DEFAULT_SENDER_ID)
     assert again.get_slot(slot_key) == slot_val
 
 
@@ -189,10 +189,8 @@ def test_tracker_store_deprecated_url_argument_from_string(default_domain: Domai
     store_config = read_endpoint_config(endpoints_path, "tracker_store")
     store_config.type = "tests.core.test_tracker_stores.URLExampleTrackerStore"
 
-    with pytest.warns(DeprecationWarning):
-        tracker_store = TrackerStore.create(store_config, default_domain)
-
-    assert isinstance(tracker_store, URLExampleTrackerStore)
+    with pytest.raises(Exception):
+        TrackerStore.create(store_config, default_domain)
 
 
 def test_tracker_store_with_host_argument_from_string(default_domain: Domain):
@@ -239,7 +237,7 @@ def _tracker_store_and_tracker_with_slot_set() -> Tuple[
     slot_val = "French"
 
     store = InMemoryTrackerStore(domain)
-    tracker = store.get_or_create_tracker(UserMessage.DEFAULT_SENDER_ID)
+    tracker = store.get_or_create_tracker(DEFAULT_SENDER_ID)
     ev = SlotSet(slot_key, slot_val)
     tracker.update(ev)
 
@@ -250,12 +248,10 @@ def test_tracker_serialisation():
     store, tracker = _tracker_store_and_tracker_with_slot_set()
     serialised = store.serialise_tracker(tracker)
 
-    assert tracker == store.deserialise_tracker(
-        UserMessage.DEFAULT_SENDER_ID, serialised
-    )
+    assert tracker == store.deserialise_tracker(DEFAULT_SENDER_ID, serialised)
 
 
-def test_deprecated_pickle_deserialisation(caplog: LogCaptureFixture):
+def test_deprecated_pickle_deserialisation():
     def pickle_serialise_tracker(_tracker):
         # mocked version of TrackerStore.serialise_tracker() that uses
         # the deprecated pickle serialisation
@@ -271,13 +267,12 @@ def test_deprecated_pickle_deserialisation(caplog: LogCaptureFixture):
 
     # deprecation warning should be emitted
 
-    caplog.clear()  # avoid counting debug messages
-    with caplog.at_level(logging.WARNING):
-        assert tracker == store.deserialise_tracker(
-            UserMessage.DEFAULT_SENDER_ID, serialised
-        )
-    assert len(caplog.records) == 1
-    assert "Deserialisation of pickled trackers will be deprecated" in caplog.text
+    with pytest.warns(FutureWarning) as record:
+        assert tracker == store.deserialise_tracker(DEFAULT_SENDER_ID, serialised)
+    assert len(record) == 1
+    assert (
+        "Deserialisation of pickled trackers is deprecated" in record[0].message.args[0]
+    )
 
 
 @pytest.mark.parametrize(
@@ -340,7 +335,25 @@ def test_get_db_url_with_query():
     )
 
 
-def test_db_url_with_query_from_endpoint_config():
+def test_sql_tracker_store_logs_do_not_show_password(caplog: LogCaptureFixture):
+    dialect = "postgresql"
+    host = "localhost"
+    port = 9901
+    db = "some-database"
+    username = "db-user"
+    password = "some-password"
+
+    with caplog.at_level(logging.DEBUG):
+        _ = SQLTrackerStore(None, dialect, host, port, db, username, password)
+
+    # the URL in the logs does not contain the password
+    assert password not in caplog.text
+
+    # instead the password is displayed as '***'
+    assert f"postgresql://{username}:***@{host}:{port}/{db}" in caplog.text
+
+
+def test_db_url_with_query_from_endpoint_config(tmp_path: Path):
     endpoint_config = """
     tracker_store:
       dialect: postgresql
@@ -353,11 +366,9 @@ def test_db_url_with_query_from_endpoint_config():
         driver: my-driver
         another: query
     """
-
-    with tempfile.NamedTemporaryFile("w+", suffix="_tmp_config_file.yml") as f:
-        f.write(endpoint_config)
-        f.flush()
-        store_config = read_endpoint_config(f.name, "tracker_store")
+    f = tmp_path / "tmp_config_file.yml"
+    f.write_text(endpoint_config)
+    store_config = read_endpoint_config(str(f), "tracker_store")
 
     url = SQLTrackerStore.get_db_url(**store_config.kwargs)
 
@@ -556,10 +567,10 @@ def test_tracker_store_retrieve_with_session_started_events(
 ):
     tracker_store = tracker_store_type(default_domain, **tracker_store_kwargs)
     events = [
-        UserUttered("Hola", {"name": "greet"}),
-        BotUttered("Hi"),
-        SessionStarted(),
-        UserUttered("Ciao", {"name": "greet"}),
+        UserUttered("Hola", {"name": "greet"}, timestamp=1),
+        BotUttered("Hi", timestamp=2),
+        SessionStarted(timestamp=3),
+        UserUttered("Ciao", {"name": "greet"}, timestamp=4),
     ]
     sender_id = "test_sql_tracker_store_with_session_events"
     tracker = DialogueStateTracker.from_events(sender_id, events)

@@ -4,16 +4,17 @@ import pytest
 from rasa.nlu import registry, train
 from rasa.nlu.config import RasaNLUModelConfig
 from rasa.nlu.model import Interpreter, Trainer
-from rasa.nlu.training_data import TrainingData
+from rasa.shared.nlu.training_data.training_data import TrainingData
 from rasa.utils.tensorflow.constants import EPOCHS
 from tests.nlu.conftest import DEFAULT_DATA_PATH
+from typing import Any, Dict, List, Tuple, Text
 
 
 def as_pipeline(*components):
     return [{"name": c, EPOCHS: 1} for c in components]
 
 
-def pipelines_for_tests():
+def pipelines_for_tests() -> List[Tuple[Text, List[Dict[Text, Any]]]]:
     # these templates really are just for testing
     # every component should be in here so train-persist-load-use cycle can be
     # tested they still need to be in a useful order - hence we can not simply
@@ -34,9 +35,8 @@ def pipelines_for_tests():
                 "LexicalSyntacticFeaturizer",
                 "CountVectorsFeaturizer",
                 "CRFEntityExtractor",
-                "DucklingHTTPExtractor",
+                "DucklingEntityExtractor",
                 "DIETClassifier",
-                "EmbeddingIntentClassifier",
                 "ResponseSelector",
                 "EntitySynonymMapper",
             ),
@@ -60,11 +60,32 @@ def pipelines_for_tests():
                 "DIETClassifier",
             ),
         ),
-        ("en", as_pipeline("ConveRTTokenizer", "ConveRTFeaturizer", "DIETClassifier")),
+        ("fallback", as_pipeline("KeywordIntentClassifier", "FallbackClassifier")),
+    ]
+
+
+def pipelines_for_non_windows_tests() -> List[Tuple[Text, List[Dict[Text, Any]]]]:
+    # these templates really are just for testing
+
+    # because some of the components are not available on Windows, we specify pipelines
+    # containing them separately
+
+    # first is language followed by list of components
+    return [
         (
             "en",
             as_pipeline(
-                "MitieNLP", "MitieTokenizer", "MitieFeaturizer", "MitieIntentClassifier"
+                "SpacyNLP", "SpacyTokenizer", "SpacyFeaturizer", "DIETClassifier"
+            ),
+        ),
+        (
+            "en",
+            as_pipeline(
+                "MitieNLP",
+                "MitieTokenizer",
+                "MitieFeaturizer",
+                "MitieIntentClassifier",
+                "RegexEntityExtractor",
             ),
         ),
         (
@@ -81,14 +102,21 @@ def test_all_components_are_in_at_least_one_test_pipeline():
     test the train-persist-load-use cycle. Ensures that
     really all components are in there."""
 
-    all_components = [c["name"] for _, p in pipelines_for_tests() for c in p]
+    all_pipelines = pipelines_for_tests() + pipelines_for_non_windows_tests()
+    all_components = [c["name"] for _, p in all_pipelines for c in p]
 
     for cls in registry.component_classes:
+        if "convert" in cls.name.lower():
+            # TODO
+            #   skip ConveRTTokenizer and ConveRTFeaturizer as the ConveRT model is not publicly available anymore
+            #   (see https://github.com/RasaHQ/rasa/issues/6806)
+            continue
         assert (
             cls.name in all_components
         ), "`all_components` template is missing component."
 
 
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize("language, pipeline", pipelines_for_tests())
 async def test_train_persist_load_parse(language, pipeline, component_builder, tmpdir):
     _config = RasaNLUModelConfig({"pipeline": pipeline, "language": language})
@@ -108,6 +136,15 @@ async def test_train_persist_load_parse(language, pipeline, component_builder, t
     assert loaded.parse("Rasa is great!") is not None
 
 
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("language, pipeline", pipelines_for_non_windows_tests())
+@pytest.mark.skip_on_windows
+async def test_train_persist_load_parse_non_windows(
+    language, pipeline, component_builder, tmpdir
+):
+    await test_train_persist_load_parse(language, pipeline, component_builder, tmpdir)
+
+
 @pytest.mark.parametrize("language, pipeline", pipelines_for_tests())
 def test_train_model_without_data(language, pipeline, component_builder, tmpdir):
     _config = RasaNLUModelConfig({"pipeline": pipeline, "language": language})
@@ -122,6 +159,16 @@ def test_train_model_without_data(language, pipeline, component_builder, tmpdir)
     assert loaded.parse("Rasa is great!") is not None
 
 
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("language, pipeline", pipelines_for_non_windows_tests())
+@pytest.mark.skip_on_windows
+def test_train_model_without_data_non_windows(
+    language, pipeline, component_builder, tmpdir
+):
+    test_train_model_without_data(language, pipeline, component_builder, tmpdir)
+
+
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize("language, pipeline", pipelines_for_tests())
 def test_load_and_persist_without_train(language, pipeline, component_builder, tmpdir):
     _config = RasaNLUModelConfig({"pipeline": pipeline, "language": language})
@@ -135,6 +182,15 @@ def test_load_and_persist_without_train(language, pipeline, component_builder, t
     assert loaded.parse("Rasa is great!") is not None
 
 
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("language, pipeline", pipelines_for_non_windows_tests())
+@pytest.mark.skip_on_windows
+def test_load_and_persist_without_train_non_windows(
+    language, pipeline, component_builder, tmpdir
+):
+    test_load_and_persist_without_train(language, pipeline, component_builder, tmpdir)
+
+
 async def test_train_model_empty_pipeline(component_builder):
     _config = RasaNLUModelConfig({"pipeline": None, "language": "en"})
 
@@ -145,7 +201,9 @@ async def test_train_model_empty_pipeline(component_builder):
 
 
 async def test_train_named_model(component_builder, tmpdir):
-    _config = RasaNLUModelConfig({"pipeline": "keyword", "language": "en"})
+    _config = RasaNLUModelConfig(
+        {"pipeline": [{"name": "KeywordIntentClassifier"}], "language": "en"}
+    )
 
     (trained, _, persisted_path) = await train(
         _config,
@@ -176,7 +234,9 @@ async def test_handles_pipeline_with_non_existing_component(
 
 
 async def test_train_model_training_data_persisted(component_builder, tmpdir):
-    _config = RasaNLUModelConfig({"pipeline": "keyword", "language": "en"})
+    _config = RasaNLUModelConfig(
+        {"pipeline": [{"name": "KeywordIntentClassifier"}], "language": "en"}
+    )
 
     (trained, _, persisted_path) = await train(
         _config,
@@ -195,7 +255,9 @@ async def test_train_model_training_data_persisted(component_builder, tmpdir):
 
 
 async def test_train_model_no_training_data_persisted(component_builder, tmpdir):
-    _config = RasaNLUModelConfig({"pipeline": "keyword", "language": "en"})
+    _config = RasaNLUModelConfig(
+        {"pipeline": [{"name": "KeywordIntentClassifier"}], "language": "en"}
+    )
 
     (trained, _, persisted_path) = await train(
         _config,

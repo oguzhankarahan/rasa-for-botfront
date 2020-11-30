@@ -1,17 +1,14 @@
 import logging
 import os
-import copy
-from typing import Optional, Text, Union, List, Dict, Any
+from typing import Optional, Text, Union, List, Dict
 
-from rasa import data
-from rasa.core.domain import Domain, InvalidDomain
-from rasa.core.interpreter import RegexInterpreter, NaturalLanguageInterpreter
-from rasa.core.training.structures import StoryGraph
-from rasa.core.training.dsl import StoryFileReader
-from rasa.importers import utils
-from rasa.importers.importer import TrainingDataImporter
-from rasa.nlu.training_data import TrainingData
-from rasa.utils import io as io_utils
+from rasa.shared.core.domain import Domain, InvalidDomain
+from rasa.shared.core.training_data.structures import StoryGraph
+from rasa.shared.importers import utils
+from rasa.shared.importers.importer import TrainingDataImporter
+from rasa.shared.nlu.training_data.training_data import TrainingData
+import rasa.shared.utils.io
+import rasa.shared.data
 from rasa.core.utils import get_file_hash
 
 logger = logging.getLogger(__name__)
@@ -26,23 +23,31 @@ class BotfrontFileImporter(TrainingDataImporter):
     ):
         self._domain_path = domain_path
 
-        self._story_files, self._nlu_files = data.get_core_nlu_files(
-            training_data_paths
+        self._nlu_files = rasa.shared.data.get_data_files(
+            training_data_paths, rasa.shared.data.is_nlu_file
+        )
+        self._story_files = rasa.shared.data.get_data_files(
+            training_data_paths, rasa.shared.data.is_story_file
         )
 
         self.core_config = {}
         self.nlu_config = {}
         if config_file:
-            if not isinstance(config_file, list): config_file = [config_file]
+            if not isinstance(config_file, list):
+                config_file = [config_file]
             for file in config_file:
-                if not os.path.exists(file): continue
-                config = io_utils.read_config_file(file)
+                if not os.path.exists(file):
+                    continue
+                config = rasa.shared.utils.io.read_config_file(file)
                 lang = config["language"]
                 self.core_config = {"policies": config["policies"]}
-                self.nlu_config[lang] = {"pipeline": config["pipeline"], "data": lang}
-    
-    def path_for_nlu_lang(self, lang) -> Text:
-        return [x for x in self._nlu_files if "{}.md".format(lang) in x]
+                self.nlu_config[lang] = {
+                    "pipeline": config["pipeline"],
+                    "language": lang,
+                }
+
+    def path_for_nlu_lang(self, lang) -> List[Text]:
+        return [x for x in self._nlu_files if "nlu/{}".format(lang) in x]
 
     async def get_config(self) -> Dict:
         return self.core_config
@@ -57,26 +62,25 @@ class BotfrontFileImporter(TrainingDataImporter):
 
     async def get_stories(
         self,
-        interpreter: "NaturalLanguageInterpreter" = RegexInterpreter(),
         template_variables: Optional[Dict] = None,
         use_e2e: bool = False,
         exclusion_percentage: Optional[int] = None,
     ) -> StoryGraph:
 
-        story_steps = await StoryFileReader.read_from_files(
+        return await utils.story_graph_from_paths(
             self._story_files,
             await self.get_domain(),
-            interpreter,
             template_variables,
             use_e2e,
             exclusion_percentage,
         )
-        return StoryGraph(story_steps)
 
     async def get_stories_hash(self):
         # Use a file hash of stories file to figure out Core fingerprint, instead of
         # storygraph object hash which is unstable
-        return get_file_hash(self._story_files[0])
+        if isinstance(self._story_files, list) and len(self._story_files):
+            return get_file_hash(self._story_files[0])
+        return 0
 
     async def get_nlu_data(self, languages=True) -> Dict[Text, TrainingData]:
         language = None
@@ -94,24 +98,18 @@ class BotfrontFileImporter(TrainingDataImporter):
             except ValueError as e:
                 if str(e).startswith("Unknown data format"):
                     td[lang] = TrainingData()
-        if language: return td.get(language, TrainingData())
+        if language:
+            return td.get(language, TrainingData())
         return td
 
     async def get_domain(self) -> Domain:
         domain = Domain.empty()
+        if not self._domain_path:
+            return domain
         try:
             domain = Domain.load(self._domain_path)
             domain.check_missing_templates()
-            bf_forms = []
-            for slot in domain.slots:
-                if slot.name == "bf_forms": bf_forms = slot.initial_value
-            bf_forms = [f.get("name") for f in bf_forms]
-
-        except InvalidDomain as e:
-            logger.warning(
-                "Loading domain from '{}' failed. Using empty domain. Error: '{}'".format(
-                    self._domain_path, e.message
-                )
-            )
-
-        return domain
+        except Exception as e:
+            logger.warning(e)
+        finally:
+            return domain

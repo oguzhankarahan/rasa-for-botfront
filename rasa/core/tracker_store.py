@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from time import sleep
 from typing import (
+    Any,
     Callable,
     Dict,
     Iterable,
@@ -21,19 +22,27 @@ from typing import (
 
 from boto3.dynamodb.conditions import Key
 import rasa.core.utils as core_utils
-from rasa.core.actions.action import ACTION_LISTEN_NAME
+import rasa.shared.utils.cli
+import rasa.shared.utils.common
+import rasa.shared.utils.io
+from rasa.shared.core.constants import ACTION_LISTEN_NAME
 from rasa.core.brokers.broker import EventBroker
 from rasa.core.constants import (
     POSTGRESQL_SCHEMA,
     POSTGRESQL_MAX_OVERFLOW,
     POSTGRESQL_POOL_SIZE,
 )
-from rasa.core.conversation import Dialogue
-from rasa.core.domain import Domain
-from rasa.core.events import SessionStarted
-from rasa.core.trackers import ActionExecuted, DialogueStateTracker, EventVerbosity
+from rasa.shared.core.conversation import Dialogue
+from rasa.shared.core.domain import Domain
+from rasa.shared.core.events import SessionStarted
+from rasa.shared.core.trackers import (
+    ActionExecuted,
+    DialogueStateTracker,
+    EventVerbosity,
+)
 import rasa.cli.utils as rasa_cli_utils
-from rasa.utils.common import class_from_module_path, raise_warning, arguments_of
+from rasa.shared.nlu.constants import INTENT_NAME_KEY
+from rasa.utils import common as common_utils
 from rasa.utils.endpoints import EndpointConfig
 import sqlalchemy as sa
 
@@ -91,23 +100,6 @@ class TrackerStore:
             return obj
         else:
             return _create_from_endpoint_config(obj, domain, event_broker)
-
-    @staticmethod
-    def create_tracker_store(
-        domain: Domain,
-        store: Optional[EndpointConfig] = None,
-        event_broker: Optional[EventBroker] = None,
-    ) -> "TrackerStore":
-        """Returns the tracker_store type"""
-
-        raise_warning(
-            "The `create_tracker_store` function is deprecated, please use "
-            "`TrackerStore.create` instead. `create_tracker_store` will be "
-            "removed in future Rasa versions.",
-            DeprecationWarning,
-        )
-
-        return TrackerStore.create(store, domain, event_broker)
 
     def get_or_create_tracker(
         self,
@@ -202,10 +194,10 @@ class TrackerStore:
         sender_id: Text, serialised_tracker: bytes
     ) -> Dialogue:
 
-        logger.warning(
+        rasa.shared.utils.io.raise_deprecation_warning(
             f"Found pickled tracker for "
             f"conversation ID '{sender_id}'. Deserialisation of pickled "
-            f"trackers will be deprecated in version 2.0. Rasa will perform any "
+            f"trackers is deprecated. Rasa will perform any "
             f"future save operations of this tracker using json serialisation."
         )
         return pickle.loads(serialised_tracker)
@@ -354,7 +346,9 @@ class DynamoTrackerStore(TrackerStore):
         import boto3
 
         dynamo = boto3.resource("dynamodb", region_name=self.region)
-        if self.table_name not in self.client.list_tables()["TableNames"]:
+        try:
+            self.client.describe_table(TableName=table_name)
+        except self.client.exceptions.ResourceNotFoundException:
             table = dynamo.create_table(
                 TableName=self.table_name,
                 KeySchema=[
@@ -578,7 +572,7 @@ def _create_sequence(table_name: Text) -> "Sequence":
     """Creates a sequence object for a specific table name.
 
     If using Oracle you will need to create a sequence in your database,
-    as described here: https://rasa.com/docs/rasa/api/tracker-stores/#sqltrackerstore
+    as described here: https://rasa.com/docs/rasa/tracker-stores#sqltrackerstore
     Args:
         table_name: The name of the table, which gets a Sequence assigned
 
@@ -607,7 +601,7 @@ def is_postgresql_url(url: Union[Text, "URL"]) -> bool:
     return url.drivername == "postgresql"
 
 
-def create_engine_kwargs(url: Union[Text, "URL"]) -> Dict[Text, Union[Text, int]]:
+def create_engine_kwargs(url: Union[Text, "URL"]) -> Dict[Text, Any]:
     """Get `sqlalchemy.create_engine()` kwargs.
 
     Args:
@@ -707,14 +701,16 @@ class SQLTrackerStore(TrackerStore):
         engine_url = self.get_db_url(
             dialect, host, port, db, username, password, login_db, query
         )
-        logger.debug(f"Attempting to connect to database via '{engine_url}'.")
+
+        self.engine = sa.create_engine(engine_url, **create_engine_kwargs(engine_url))
+
+        logger.debug(
+            f"Attempting to connect to database via '{repr(self.engine.url)}'."
+        )
 
         # Database might take a while to come up
         while True:
             try:
-                self.engine = sa.engine.create_engine(
-                    engine_url, **create_engine_kwargs(engine_url)
-                )
                 # if `login_db` has been provided, use current channel with
                 # that database to create working database `db`
                 if login_db:
@@ -837,7 +833,7 @@ class SQLTrackerStore(TrackerStore):
             ensure_schema_exists(session)
             yield session
         except ValueError as e:
-            rasa_cli_utils.print_error_and_exit(
+            rasa.shared.utils.cli.print_error_and_exit(
                 f"Requested PostgreSQL schema '{e}' was not found in the database. To "
                 f"continue, please create the schema by running 'CREATE DATABASE {e};' "
                 f"or unset the '{POSTGRESQL_SCHEMA}' environment variable in order to "
@@ -921,7 +917,9 @@ class SQLTrackerStore(TrackerStore):
 
             for event in events:
                 data = event.as_dict()
-                intent = data.get("parse_data", {}).get("intent", {}).get("name")
+                intent = (
+                    data.get("parse_data", {}).get("intent", {}).get(INTENT_NAME_KEY)
+                )
                 action = data.get("name")
                 timestamp = data.get("timestamp")
 
@@ -1068,14 +1066,16 @@ def _create_from_endpoint_config(
             domain=domain, event_broker=event_broker, **endpoint_config.kwargs
         )
     else:
-        tracker_store = _load_from_module_string(domain, endpoint_config, event_broker)
+        tracker_store = _load_from_module_name_in_endpoint_config(
+            domain, endpoint_config, event_broker
+        )
 
     logger.debug(f"Connected to {tracker_store.__class__.__name__}.")
 
     return tracker_store
 
 
-def _load_from_module_string(
+def _load_from_module_name_in_endpoint_config(
     domain: Domain, store: EndpointConfig, event_broker: Optional[EventBroker] = None
 ) -> "TrackerStore":
     """Initializes a custom tracker.
@@ -1092,16 +1092,17 @@ def _load_from_module_string(
     """
 
     try:
-        tracker_store_class = class_from_module_path(store.type)
-        init_args = arguments_of(tracker_store_class.__init__)
+        tracker_store_class = rasa.shared.utils.common.class_from_module_path(
+            store.type
+        )
+        init_args = rasa.shared.utils.common.arguments_of(tracker_store_class.__init__)
         if "url" in init_args and "host" not in init_args:
-            raise_warning(
-                "The `url` initialization argument for custom tracker stores is "
-                "deprecated. Your custom tracker store should take a `host` "
-                "argument in its `__init__()` instead.",
-                DeprecationWarning,
+            # DEPRECATION EXCEPTION - remove in 2.1
+            raise Exception(
+                "The `url` initialization argument for custom tracker stores has "
+                "been removed. Your custom tracker store should take a `host` "
+                "argument in its `__init__()` instead."
             )
-            store.kwargs["url"] = store.url
         else:
             store.kwargs["host"] = store.url
 
@@ -1109,7 +1110,7 @@ def _load_from_module_string(
             domain=domain, event_broker=event_broker, **store.kwargs
         )
     except (AttributeError, ImportError):
-        raise_warning(
+        rasa.shared.utils.io.raise_warning(
             f"Tracker store with type '{store.type}' not found. "
             f"Using `InMemoryTrackerStore` instead."
         )

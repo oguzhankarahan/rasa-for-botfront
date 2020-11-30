@@ -2,15 +2,16 @@ import json
 import logging
 import os
 from typing import Any, List, Text, Dict
-import rasa.utils.io
+import rasa.shared.utils.io
 import re
 from rasa.core.actions.action import ACTION_LISTEN_NAME
 from rasa.core.constants import FALLBACK_POLICY_PRIORITY
 
-from rasa.core.domain import Domain
+from rasa.shared.core.domain import Domain
 from rasa.core.policies.policy import Policy, confidence_scores_for
-from rasa.core.events import SlotSet
-from rasa.core.trackers import DialogueStateTracker
+from rasa.shared.core.events import SlotSet
+from rasa.shared.core.trackers import DialogueStateTracker
+from rasa.shared.nlu.interpreter import NaturalLanguageInterpreter
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class BotfrontDisambiguationPolicy(Policy):
         disambiguation_trigger: str = "$0 < 2 * $1",
         fallback_trigger: float = 0.30,
         disambiguation_template: Text = "utter_disambiguation",
-        excluded_intents: List = ["^chitchat\..*", "^basics\..*"],
+        excluded_intents: List = [r"^chitchat\..*", r"^basics\..*"],
         n_suggestions: int = 2,
     ) -> None:
         super(BotfrontDisambiguationPolicy, self).__init__(priority=priority)
@@ -36,7 +37,7 @@ class BotfrontDisambiguationPolicy(Policy):
         self.fallback_default_confidence = 0.30
         self.disambiguation_action = "action_botfront_disambiguation"
         self.disambiguation_followup_action = "action_botfront_disambiguation_followup"
-        self.fallback_action = "action_botfront_fallback" # returns utter_fallback
+        self.fallback_action = "action_botfront_fallback"  # returns utter_fallback
         self.disambiguation_template = disambiguation_template
         self.excluded_intents = excluded_intents
         self.n_suggestions = n_suggestions
@@ -45,7 +46,7 @@ class BotfrontDisambiguationPolicy(Policy):
         self,
         training_trackers: List[DialogueStateTracker],
         domain: Domain,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         pass
 
@@ -53,10 +54,11 @@ class BotfrontDisambiguationPolicy(Policy):
         intents = [
             (
                 intent.get("name"),
-                self.fill_entity(intent.get("canonical", intent.get("name")), entities)
+                self.fill_entity(intent.get("canonical", intent.get("name")), entities),
             )
             for intent in intent_ranking
-            if intent.get("name") is not None and len(
+            if intent.get("name") is not None
+            and len(
                 [
                     excl
                     for excl in self.excluded_intents
@@ -81,7 +83,10 @@ class BotfrontDisambiguationPolicy(Policy):
                     "payload": "/{}{}".format(intent[0], entities_json),
                 }
             )
-        return {"template": self.disambiguation_template, "quick_replies": quick_replies}
+        return {
+            "template": self.disambiguation_template,
+            "quick_replies": quick_replies,
+        }
 
     @staticmethod
     def fill_entity(template, entities):
@@ -93,7 +98,7 @@ class BotfrontDisambiguationPolicy(Policy):
 
     @staticmethod
     def set_slot(tracker, message):
-        if len(message["quick_replies"]) < 2:
+        if len(message.get("quick_replies", [])) < 2:
             return None  # abort if only deny_suggestions button would be shown
         try:
             tracker.update(SlotSet("disambiguation_message", value=message))
@@ -117,7 +122,7 @@ class BotfrontDisambiguationPolicy(Policy):
             if int(i) >= len(intent_ranking):
                 return False
             eval_string = re.sub(
-                r"\$" + i, str(intent_ranking[int(i)]["confidence"]), eval_string
+                r"\$" + i, str(intent_ranking[int(i)].get("confidence", 1)), eval_string
             )
 
         return eval(eval_string, {"__builtins__": {}})
@@ -125,7 +130,7 @@ class BotfrontDisambiguationPolicy(Policy):
     @staticmethod
     def _should_fallback(intent_ranking, trigger):
         bonified_ranking = intent_ranking + [{"confidence": 0}]
-        return bonified_ranking[0]["confidence"] < trigger
+        return bonified_ranking[0].get("confidence", 1) < trigger
 
     def _is_user_input_expected(self, tracker: DialogueStateTracker) -> bool:
         return tracker.latest_action_name in [
@@ -137,7 +142,10 @@ class BotfrontDisambiguationPolicy(Policy):
         return tracker.last_executed_action_has(self.disambiguation_action)
 
     def predict_action_probabilities(
-        self, tracker: DialogueStateTracker, domain: Domain
+        self,
+        tracker: DialogueStateTracker,
+        domain: Domain,
+        interpreter: NaturalLanguageInterpreter,
     ) -> List[float]:
 
         parse_data = tracker.latest_message.parse_data
@@ -204,8 +212,8 @@ class BotfrontDisambiguationPolicy(Policy):
             "excluded_intents": self.excluded_intents,
             "n_suggestions": self.n_suggestions,
         }
-        rasa.utils.io.create_directory_for_file(config_file)
-        rasa.utils.io.dump_obj_as_json_to_file(config_file, meta)
+        rasa.shared.utils.io.create_directory_for_file(config_file)
+        rasa.shared.utils.io.dump_obj_as_json_to_file(config_file, meta)
 
     @classmethod
     def load(cls, path: Text) -> "BotfrontDisambiguationPolicy":
@@ -213,6 +221,6 @@ class BotfrontDisambiguationPolicy(Policy):
         if os.path.exists(path):
             meta_path = os.path.join(path, "botfront_disambiguation_policy.json")
             if os.path.isfile(meta_path):
-                meta = json.loads(rasa.utils.io.read_file(meta_path))
+                meta = json.loads(rasa.shared.utils.io.read_file(meta_path))
 
         return cls(**meta)

@@ -1,4 +1,4 @@
-from rasa.core.events import (
+from rasa.shared.core.events import (
     UserUtteranceReverted,
     UserUttered,
     ActionExecuted,

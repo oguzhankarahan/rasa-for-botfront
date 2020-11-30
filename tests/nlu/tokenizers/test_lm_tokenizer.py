@@ -1,24 +1,26 @@
 import pytest
 
-from rasa.nlu.training_data import Message, TrainingData
+from rasa.shared.nlu.training_data.training_data import TrainingData
+from rasa.shared.nlu.training_data.message import Message
 from rasa.nlu.constants import (
-    TEXT,
-    INTENT,
     TOKENS_NAMES,
     LANGUAGE_MODEL_DOCS,
     TOKEN_IDS,
+    NUMBER_OF_SUB_TOKENS,
 )
+from rasa.shared.nlu.constants import TEXT, INTENT
 from rasa.nlu.tokenizers.lm_tokenizer import LanguageModelTokenizer
 from rasa.nlu.utils.hugging_face.hf_transformers import HFTransformersNLP
 
 
 # TODO: need to fix this failing test
-@pytest.mark.xfail(strict=False)
+@pytest.mark.skip(reason="Results in random crashing of github action workers")
 @pytest.mark.parametrize(
-    "model_name, texts, expected_tokens, expected_indices, expected_num_token_ids",
+    "model_name, model_weights, texts, expected_tokens, expected_indices, expected_num_token_ids",
     [
         (
             "bert",
+            None,
             [
                 "Good evening.",
                 "you're",
@@ -67,7 +69,31 @@ from rasa.nlu.utils.hugging_face.hf_transformers import HFTransformersNLP
             [4, 4, 5, 5, 13],
         ),
         (
+            "bert",
+            "bert-base-chinese",
+            [
+                "晚上好",  # normal & easy case
+                "没问题！",  # `！` is a Chinese punctuation
+                "去东畈村",  # `畈` is a OOV token for bert-base-chinese
+                "好的😃",  # include a emoji which is common in Chinese text-based chat
+            ],
+            [
+                ["晚", "上", "好"],
+                ["没", "问", "题", "！"],
+                ["去", "东", "畈", "村"],
+                ["好", "的", "😃"],
+            ],
+            [
+                [(0, 1), (1, 2), (2, 3)],
+                [(0, 1), (1, 2), (2, 3), (3, 4)],
+                [(0, 1), (1, 2), (2, 3), (3, 4)],
+                [(0, 1), (1, 2), (2, 3)],
+            ],
+            [3, 4, 4, 3],
+        ),
+        (
             "gpt",
+            None,
             [
                 "Good evening.",
                 "hello",
@@ -106,6 +132,7 @@ from rasa.nlu.utils.hugging_face.hf_transformers import HFTransformersNLP
         ),
         (
             "gpt2",
+            None,
             [
                 "Good evening.",
                 "hello",
@@ -158,6 +185,7 @@ from rasa.nlu.utils.hugging_face.hf_transformers import HFTransformersNLP
         ),
         (
             "xlnet",
+            None,
             [
                 "Good evening.",
                 "hello",
@@ -208,6 +236,7 @@ from rasa.nlu.utils.hugging_face.hf_transformers import HFTransformersNLP
         ),
         (
             "distilbert",
+            None,
             [
                 "Good evening.",
                 "you're",
@@ -257,6 +286,7 @@ from rasa.nlu.utils.hugging_face.hf_transformers import HFTransformersNLP
         ),
         (
             "roberta",
+            None,
             [
                 "Good evening.",
                 "hello",
@@ -309,11 +339,21 @@ from rasa.nlu.utils.hugging_face.hf_transformers import HFTransformersNLP
         ),
     ],
 )
+@pytest.mark.skip_on_windows
 def test_lm_tokenizer_edge_cases(
-    model_name, texts, expected_tokens, expected_indices, expected_num_token_ids
+    model_name,
+    model_weights,
+    texts,
+    expected_tokens,
+    expected_indices,
+    expected_num_token_ids,
 ):
 
-    transformers_config = {"model_name": model_name}
+    if model_weights is None:
+        model_weights_config = {}
+    else:
+        model_weights_config = {"model_weights": model_weights}
+    transformers_config = {**{"model_name": model_name}, **model_weights_config}
 
     transformers_nlp = HFTransformersNLP(transformers_config)
     lm_tokenizer = LanguageModelTokenizer()
@@ -341,6 +381,7 @@ def test_lm_tokenizer_edge_cases(
         ("Forecast+for+LUNCH", ["Forecast", "for", "LUNCH"]),
     ],
 )
+@pytest.mark.skip_on_windows
 def test_lm_tokenizer_custom_intent_symbol(text, expected_tokens):
     component_config = {"intent_tokenization_flag": True, "intent_split_symbol": "+"}
 
@@ -349,7 +390,7 @@ def test_lm_tokenizer_custom_intent_symbol(text, expected_tokens):
     transformers_nlp = HFTransformersNLP(transformers_config)
     lm_tokenizer = LanguageModelTokenizer(component_config)
 
-    message = Message(text)
+    message = Message.build(text=text)
     message.set(INTENT, text)
 
     td = TrainingData([message])
@@ -358,3 +399,26 @@ def test_lm_tokenizer_custom_intent_symbol(text, expected_tokens):
     lm_tokenizer.train(td)
 
     assert [t.text for t in message.get(TOKENS_NAMES[INTENT])] == expected_tokens
+
+
+@pytest.mark.parametrize(
+    "text, expected_number_of_sub_tokens",
+    [("sentence embeddings", [1, 4]), ("this is a test", [1, 1, 1, 1])],
+)
+@pytest.mark.skip_on_windows
+def test_lm_tokenizer_number_of_sub_tokens(text, expected_number_of_sub_tokens):
+    transformers_config = {"model_name": "bert"}  # Test for one should be enough
+
+    transformers_nlp = HFTransformersNLP(transformers_config)
+    lm_tokenizer = LanguageModelTokenizer()
+
+    message = Message.build(text=text)
+
+    td = TrainingData([message])
+
+    transformers_nlp.train(td)
+    lm_tokenizer.train(td)
+
+    assert [
+        t.get(NUMBER_OF_SUB_TOKENS) for t in message.get(TOKENS_NAMES[TEXT])
+    ] == expected_number_of_sub_tokens

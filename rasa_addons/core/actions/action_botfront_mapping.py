@@ -1,4 +1,4 @@
-from rasa.core.events import Event
+from rasa.shared.core.events import Event
 from rasa.core.actions.action import Action, create_bot_utterance
 
 from typing import Any, List, Text, Dict, Optional

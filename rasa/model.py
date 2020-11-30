@@ -1,29 +1,37 @@
+import copy
 import glob
+import hashlib
 import logging
 import os
 import shutil
+from subprocess import CalledProcessError, DEVNULL, check_output  # skipcq:BAN-B404
 import tempfile
 import typing
+from packaging import version
 from pathlib import Path
 from typing import Text, Tuple, Union, Optional, List, Dict, NamedTuple
 
+import rasa.shared.utils.io
 import rasa.utils.io
-from rasa.cli.utils import print_success, create_output_path
-from rasa.constants import (
-    DEFAULT_MODELS_PATH,
-    CONFIG_MANDATORY_KEYS_CORE,
-    CONFIG_MANDATORY_KEYS_NLU,
-    CONFIG_MANDATORY_KEYS,
+from rasa.cli.utils import create_output_path
+from rasa.shared.utils.cli import print_success
+from rasa.shared.constants import (
+    CONFIG_KEYS_CORE,
+    CONFIG_KEYS_NLU,
+    CONFIG_KEYS,
     DEFAULT_DOMAIN_PATH,
+    DEFAULT_MODELS_PATH,
     DEFAULT_CORE_SUBDIRECTORY_NAME,
+    DEFAULT_NLU_SUBDIRECTORY_NAME,
 )
+from rasa.constants import MINIMUM_COMPATIBLE_VERSION
 
 from rasa.core.utils import get_dict_hash
 from rasa.exceptions import ModelNotFound
 from rasa.utils.common import TempDirectoryPath
 
 if typing.TYPE_CHECKING:
-    from rasa.importers.importer import TrainingDataImporter
+    from rasa.shared.importers.importer import TrainingDataImporter
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +50,7 @@ FINGERPRINT_NLG_KEY = "nlg"
 FINGERPRINT_RASA_VERSION_KEY = "version"
 FINGERPRINT_STORIES_KEY = "stories"
 FINGERPRINT_NLU_DATA_KEY = "messages"
+FINGERPRINT_PROJECT = "project"
 FINGERPRINT_TRAINED_AT_KEY = "trained_at"
 
 
@@ -88,7 +97,7 @@ class FingerprintComparisonResult:
         Args:
             nlu: `True` if the NLU model should be retrained.
             core: `True` if the Core model should be retrained.
-            nlg: `True` if the templates in the domain should be updated.
+            nlg: `True` if the responses in the domain should be updated.
             force_training: `True` if a training of all parts is forced.
         """
         self.nlu = nlu
@@ -107,7 +116,7 @@ class FingerprintComparisonResult:
         return self.force_training or self.core
 
     def should_retrain_nlg(self) -> bool:
-        """Check if the templates have to be updated."""
+        """Check if the responses have to be updated."""
 
         return self.should_retrain_core() or self.nlg
 
@@ -214,11 +223,16 @@ def get_model_subdirectories(
     """
     core_path = os.path.join(unpacked_model_path, DEFAULT_CORE_SUBDIRECTORY_NAME)
     # bf mod
-    # nlu_path = os.path.join(unpacked_model_path, "nlu")
-    nlu_models = list(filter(lambda d: d.startswith("nlu"), os.listdir(unpacked_model_path)))
+    # nlu_path = os.path.join(unpacked_model_path, DEFAULT_NLU_SUBDIRECTORY_NAME)
+    nlu_models = list(
+        filter(lambda d: d.startswith("nlu"), os.listdir(unpacked_model_path))
+    )
 
     models_fingerprint = fingerprint_from_path(unpacked_model_path)
-    nlu_paths = {lang: None for lang in models_fingerprint.get(FINGERPRINT_CONFIG_NLU_KEY).keys()}
+    nlu_paths = {
+        lang: None
+        for lang in models_fingerprint.get(FINGERPRINT_CONFIG_NLU_KEY, {}).keys()
+    }
     try:
         for model in nlu_models:
             lang = model.split("-")[1]
@@ -274,6 +288,21 @@ def create_package_rasa(
     return output_filename
 
 
+def project_fingerprint() -> Optional[Text]:
+    """Create a hash for the project in the current working directory.
+
+    Returns:
+        project hash
+    """
+    try:
+        remote = check_output(  # skipcq:BAN-B607,BAN-B603
+            ["git", "remote", "get-url", "origin"], stderr=DEVNULL
+        )
+        return hashlib.sha256(remote).hexdigest()
+    except (CalledProcessError, OSError):
+        return None
+
+
 async def model_fingerprint(file_importer: "TrainingDataImporter") -> Fingerprint:
     """Create a model fingerprint from its used configuration and training data.
 
@@ -284,9 +313,6 @@ async def model_fingerprint(file_importer: "TrainingDataImporter") -> Fingerprin
         The fingerprint.
 
     """
-    from rasa.core.domain import Domain
-
-    import rasa
     import time
 
     # bf mod
@@ -294,28 +320,34 @@ async def model_fingerprint(file_importer: "TrainingDataImporter") -> Fingerprin
     domain = await file_importer.get_domain()
     stories_hash = await file_importer.get_stories_hash()
     nlu_data = await file_importer.get_nlu_data()
-
     nlu_config = await file_importer.get_nlu_config()
-    domain_dict = domain.as_dict()
-    templates = domain_dict.pop("responses")
-    domain_without_nlg = Domain.from_dict(domain_dict)
+
+    responses = domain.templates
+
+    # Do a copy of the domain to not change the actual domain (shallow is enough)
+    domain = copy.copy(domain)
+    # don't include the response texts in the fingerprint.
+    # Their fingerprint is separate.
+    domain.templates = []
 
     return {
-        FINGERPRINT_CONFIG_KEY: _get_hash_of_config(
-            config, exclude_keys=CONFIG_MANDATORY_KEYS
-        ),
+        FINGERPRINT_CONFIG_KEY: _get_hash_of_config(config, exclude_keys=CONFIG_KEYS),
         FINGERPRINT_CONFIG_CORE_KEY: _get_hash_of_config(
-            config, include_keys=CONFIG_MANDATORY_KEYS_CORE
+            config, include_keys=CONFIG_KEYS_CORE
         ),
-        FINGERPRINT_CONFIG_NLU_KEY: {lang: _get_hash_of_config(config, include_keys=CONFIG_MANDATORY_KEYS_NLU)
-                                        for (lang, config) in nlu_config.items()} if len(nlu_config) else '',
-        FINGERPRINT_DOMAIN_WITHOUT_NLG_KEY: hash(domain_without_nlg),
-        FINGERPRINT_NLG_KEY: get_dict_hash(templates),
-        FINGERPRINT_NLU_DATA_KEY: {lang: hash(nlu_data[lang])
-                                    for lang in nlu_data},
+        FINGERPRINT_CONFIG_NLU_KEY: {
+            lang: _get_hash_of_config(config, include_keys=CONFIG_KEYS_NLU)
+            for (lang, config) in nlu_config.items()
+        }
+        if len(nlu_config)
+        else "",
+        FINGERPRINT_DOMAIN_WITHOUT_NLG_KEY: hash(domain),
+        FINGERPRINT_NLG_KEY: get_dict_hash(responses),
+        FINGERPRINT_PROJECT: project_fingerprint(),
+        FINGERPRINT_NLU_DATA_KEY: {lang: hash(nlu_data[lang]) for lang in nlu_data},
         FINGERPRINT_STORIES_KEY: stories_hash,
         FINGERPRINT_TRAINED_AT_KEY: time.time(),
-        FINGERPRINT_RASA_VERSION_KEY: rasa.__version__,
+        FINGERPRINT_RASA_VERSION_KEY: rasa.__version__,  # pytype: disable=module-attr
     }
     # /bf mod
 
@@ -350,7 +382,7 @@ def fingerprint_from_path(model_path: Text) -> Fingerprint:
     fingerprint_path = os.path.join(model_path, FINGERPRINT_FILE_PATH)
 
     if os.path.isfile(fingerprint_path):
-        return rasa.utils.io.read_json_file(fingerprint_path)
+        return rasa.shared.utils.io.read_json_file(fingerprint_path)
     else:
         return {}
 
@@ -365,7 +397,7 @@ def persist_fingerprint(output_path: Text, fingerprint: Fingerprint):
     """
 
     path = os.path.join(output_path, FINGERPRINT_FILE_PATH)
-    rasa.utils.io.dump_obj_as_json_to_file(path, fingerprint)
+    rasa.shared.utils.io.dump_obj_as_json_to_file(path, fingerprint)
 
 
 def did_section_fingerprint_change(
@@ -373,20 +405,26 @@ def did_section_fingerprint_change(
 ) -> bool:
     """Check whether the fingerprint of a section has changed."""
     # bf mod >
-    if (section.name == "NLU model"):
-        all_languages = set(list(fingerprint1.get(FINGERPRINT_NLU_DATA_KEY).keys()) +
-                        list(fingerprint1.get(FINGERPRINT_CONFIG_NLU_KEY).keys()) +
-                        list(fingerprint2.get(FINGERPRINT_NLU_DATA_KEY).keys()) +
-                        list(fingerprint2.get(FINGERPRINT_CONFIG_NLU_KEY).keys()))
+    if section.name == "NLU model":
+        all_languages = set(
+            list(fingerprint1.get(FINGERPRINT_NLU_DATA_KEY).keys())
+            + list(fingerprint1.get(FINGERPRINT_CONFIG_NLU_KEY).keys())
+            + list(fingerprint2.get(FINGERPRINT_NLU_DATA_KEY).keys())
+            + list(fingerprint2.get(FINGERPRINT_CONFIG_NLU_KEY).keys())
+        )
 
-        languages_in_new_model = set(list(fingerprint2.get(FINGERPRINT_NLU_DATA_KEY).keys()) +
-                                    list(fingerprint2.get(FINGERPRINT_CONFIG_NLU_KEY).keys()))
-        languages_in_old_model = set(list(fingerprint1.get(FINGERPRINT_NLU_DATA_KEY).keys()) +
-                                    list(fingerprint1.get(FINGERPRINT_CONFIG_NLU_KEY).keys()))
+        languages_in_new_model = set(
+            list(fingerprint2.get(FINGERPRINT_NLU_DATA_KEY).keys())
+            + list(fingerprint2.get(FINGERPRINT_CONFIG_NLU_KEY).keys())
+        )
+        languages_in_old_model = set(
+            list(fingerprint1.get(FINGERPRINT_NLU_DATA_KEY).keys())
+            + list(fingerprint1.get(FINGERPRINT_CONFIG_NLU_KEY).keys())
+        )
         languages_added = list(languages_in_new_model - languages_in_old_model)
         languages_removed = list(languages_in_old_model - languages_in_new_model)
         languages_to_retrain = set()
-        
+
         for k in section.relevant_keys:
             if not isinstance(fingerprint1.get(k), dict):
                 if fingerprint1.get(k) != fingerprint2.get(k):
@@ -454,6 +492,10 @@ def should_retrain(
         last_fingerprint = fingerprint_from_path(unpacked)
         old_core, old_nlu = get_model_subdirectories(unpacked)
 
+        model_outdated = version.parse(last_fingerprint.get("version")) < version.parse(
+            MINIMUM_COMPATIBLE_VERSION
+        )
+
         fingerprint_comparison = FingerprintComparisonResult(
             core=did_section_fingerprint_change(
                 last_fingerprint, new_fingerprint, SECTION_CORE
@@ -464,6 +506,7 @@ def should_retrain(
             nlg=did_section_fingerprint_change(
                 last_fingerprint, new_fingerprint, SECTION_NLG
             ),
+            force_training=model_outdated,
         )
 
         core_merge_failed = False
@@ -483,8 +526,11 @@ def should_retrain(
         languages_to_train = fingerprint_comparison.should_retrain_nlu()
         for lang in old_nlu.keys():
             target_path = os.path.join(train_path, "nlu-{}".format(lang))
-            if not move_model(old_nlu.get(lang), target_path):
-                languages_to_train.append(lang)
+            if lang in new_fingerprint.get("nlu-config").keys():
+                # only attempt move if language is still in new fingerprints
+                # that way new model will not include that old lang
+                if not move_model(old_nlu.get(lang), target_path):
+                    languages_to_train.append(lang)
         fingerprint_comparison.nlu = languages_to_train
         # </ bf mod
 
@@ -497,7 +543,7 @@ def package_model(
     train_path: Text,
     fixed_model_name: Optional[Text] = None,
     model_prefix: Text = "",
-):
+) -> Text:
     """
     Compress a trained model.
 

@@ -1,18 +1,18 @@
 import time
 import logging
 import requests
-from rasa.nlu.extractors.duckling_http_extractor import DucklingHTTPExtractor, convert_duckling_format_to_rasa
-from rasa.utils.common import raise_warning
-from rasa.nlu.training_data import Message
+from rasa.nlu.extractors.duckling_entity_extractor import DucklingEntityExtractor, convert_duckling_format_to_rasa
+from rasa.shared.utils.io import raise_warning
+from rasa.shared.nlu.training_data.message import Message
 
 from typing import Any, List, Optional, Text, Dict
-from rasa.constants import DOCS_URL_COMPONENTS
-from rasa.nlu.constants import ENTITIES
+from rasa.shared.constants import DOCS_URL_COMPONENTS
+from rasa.shared.nlu.constants import ENTITIES
 
 logger = logging.getLogger(__name__)
 
 
-class DucklingHTTPExtractorWithTimezone(DucklingHTTPExtractor):
+class DucklingHTTPExtractorWithTimezone(DucklingEntityExtractor):
 
     def _duckling_parse(self, text: Text, reference_time: int, timezone) -> List[Dict[Text, Any]]:
         """Sends the request to the duckling server and parses the result."""
@@ -98,7 +98,7 @@ class DucklingHTTPExtractorWithTimezone(DucklingHTTPExtractor):
             # </ mod
             all_extracted = convert_duckling_format_to_rasa(matches)
             dimensions = self.component_config["dimensions"]
-            extracted = DucklingHTTPExtractor.filter_irrelevant_entities(
+            extracted = DucklingEntityExtractor.filter_irrelevant_entities(
                 all_extracted, dimensions
             )
         else:

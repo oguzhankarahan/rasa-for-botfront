@@ -1,11 +1,9 @@
 import pytest
 
-from typing import Tuple
-from rasa.nlu import registry
+from rasa.nlu import registry, train
 from rasa.nlu.components import find_unavailable_packages
 from rasa.nlu.config import RasaNLUModelConfig
-from rasa.nlu.model import Metadata
-from tests.nlu import utilities
+from rasa.nlu.model import Interpreter, Metadata
 
 
 @pytest.mark.parametrize("component_class", registry.component_classes)
@@ -17,19 +15,6 @@ def test_no_components_with_same_name(component_class):
     assert (
         names.count(component_class.name) == 1
     ), f"There is more than one component named {component_class.name}"
-
-
-@pytest.mark.parametrize("pipeline_template", registry.registered_pipeline_templates)
-def test_all_components_in_model_templates_exist(pipeline_template):
-    """We provide a couple of ready to use pipelines, this test ensures
-    all components referenced by name in the
-    pipeline definitions are available."""
-
-    components = registry.registered_pipeline_templates[pipeline_template]
-    for component in components:
-        assert (
-            component["name"] in registry.registered_components
-        ), "Model template contains unknown component."
 
 
 @pytest.mark.parametrize("component_class", registry.component_classes)
@@ -97,17 +82,93 @@ def test_builder_load_unknown(component_builder):
     assert "Cannot find class" in str(excinfo.value)
 
 
-async def test_example_component(component_builder, tmpdir_factory):
-    conf = RasaNLUModelConfig(
+async def test_example_component(component_builder, tmp_path):
+    _config = RasaNLUModelConfig(
         {"pipeline": [{"name": "tests.nlu.example_component.MyComponent"}]}
     )
 
-    interpreter = await utilities.interpreter_for(
-        component_builder,
+    (trainer, trained, persisted_path) = await train(
+        _config,
         data="./data/examples/rasa/demo-rasa.json",
-        path=tmpdir_factory.mktemp("projects").strpath,
-        config=conf,
+        path=str(tmp_path),
+        component_builder=component_builder,
     )
 
-    r = interpreter.parse("test")
-    assert r is not None
+    assert trainer.pipeline
+
+    loaded = Interpreter.load(persisted_path, component_builder)
+
+    assert loaded.parse("test") is not None
+
+
+@pytest.mark.parametrize(
+    "supported_language_list, not_supported_language_list, language, expected",
+    [
+        # in following comments: VAL stands for any valid setting
+        # for language is `None`
+        (None, None, None, True),
+        # (None, None)
+        (None, None, "en", True),
+        # (VAL, None)
+        (["en"], None, "en", True),
+        (["en"], None, "zh", False),
+        # (VAL, [])
+        (["en"], [], "en", True),
+        (["en"], [], "zh", False),
+        # (None, VAL)
+        (None, ["en"], "en", False),
+        (None, ["en"], "zh", True),
+        # ([], VAL)
+        ([], ["en"], "en", False),
+        ([], ["en"], "zh", True),
+    ],
+)
+def test_can_handle_language_logically_correctness(
+    supported_language_list, not_supported_language_list, language, expected
+):
+    from rasa.nlu.components import Component
+
+    SampleComponent = type(
+        "SampleComponent",
+        (Component,),
+        {
+            "supported_language_list": supported_language_list,
+            "not_supported_language_list": not_supported_language_list,
+        },
+    )
+
+    assert SampleComponent.can_handle_language(language) == expected
+
+
+@pytest.mark.parametrize(
+    "supported_language_list, not_supported_language_list, expected_exec_msg",
+    [
+        # in following comments: VAL stands for any valid setting
+        # (None, [])
+        (None, [], "Empty lists for both"),
+        # ([], None)
+        ([], None, "Empty lists for both"),
+        # ([], [])
+        ([], [], "Empty lists for both"),
+        # (VAL, VAL)
+        (["en"], ["zh"], "Only one of"),
+    ],
+)
+def test_can_handle_language_guard_clause(
+    supported_language_list, not_supported_language_list, expected_exec_msg
+):
+    from rasa.nlu.components import Component
+    from rasa.shared.exceptions import RasaException
+
+    SampleComponent = type(
+        "SampleComponent",
+        (Component,),
+        {
+            "supported_language_list": supported_language_list,
+            "not_supported_language_list": not_supported_language_list,
+        },
+    )
+
+    with pytest.raises(RasaException) as excinfo:
+        SampleComponent.can_handle_language("random_string")
+    assert expected_exec_msg in str(excinfo.value)

@@ -6,7 +6,7 @@ from sanic import Sanic, Blueprint, response
 from sanic.request import Request
 from sanic.response import HTTPResponse
 from socketio import AsyncServer
-from rasa.utils.common import raise_warning
+from rasa.shared.utils.io import raise_warning
 
 from typing import Text, List, Dict, Any, Optional, Callable, Iterable, Awaitable
 
