@@ -1,10 +1,122 @@
 ---
 id: changelog
-sidebar_label: Rasa Open Source Change Log
+sidebar_label: Rasa For Botfront Changelog
 title: Rasa For Botfront Changelog
 ---
 
+All notable changes to this project will be documented in this file.
+This project adheres to [Semantic Versioning](https://semver.org/) starting with version 1.0.
+
+<!-- You should **NOT** be adding new change log entries to this file, this
+file is managed by ``towncrier``.
+
+You **may** edit previous change logs to fix problems like typo corrections or such.
+You can find more information on how to add a new change log entry at
+https://github.com/RasaHQ/rasa/tree/main/changelog/ . -->
+
 <!-- TOWNCRIER -->
+
+## [2.3.3-bf.5] - 2021-03-30
+
+### Improvements
+
+- [#55](https://github.com/dialoguemd/rasa-for-botfront/pull/55): Configure the botfront tracker store to call event brokers.
+
+## [2.3.3-bf.4] - 2021-03-22
+
+### Features
+
+- [#51](https://github.com/dialoguemd/rasa-for-botfront/pull/51): Conditions in Botfront forms can now be written in pypred. The old format still works too.
+
+## [2.3.3-bf.3] - 2021-03-17
+
+### Improvements
+
+- [#49](https://github.com/botfront/rasa-for-botfront/pull/49): Model auto load after using `/model/train` route.
+
+### Bugfixes
+
+- [#50](https://github.com/botfront/rasa-for-botfront/pull/50): Fix entity comparision in regression test channel.
+
+## [2.3.3-bf.2] - 2021-03-10
+
+### Improvements
+
+- [#48](https://github.com/botfront/rasa-for-botfront/pull/48): Load local endpoints/credentials files if present.
+- [#47](https://github.com/botfront/rasa-for-botfront/pull/47): Allow training from CLI.
+
+## [2.3.3-bf.1] - 2021-02-25
+
+### Improvements
+
+- [#43](https://github.com/botfront/rasa-for-botfront/pull/43): Support for securing Rasa API with auth token with an env var.
+
+## [2.2.5-bf.3] - 2021-01-29
+
+### Bugfixes
+
+- [#39](https://github.com/botfront/rasa-for-botfront/pull/39): Fix bot regression tests always use fallback lang.
+
+## [2.2.5-bf.1] - 2021-01-19
+
+### Bugfixes
+
+- [fe8d0d3](https://github.com/botfront/rasa-for-botfront/commit/fe8d0d3d6cd2328da9038c7eaa77e9be84079731): Better outdated model handling.
+
+## [2.1.3-bf.7] - 2021-01-15
+
+### Bugfixes
+
+- [e8ee72e](https://github.com/botfront/rasa-for-botfront/commit/e8ee72e39fa0aa0815ad6407b47f06b4f5da0d49): Don't collect form results if it's a regression test run.
+
+## [2.1.3-bf.5] - 2021-01-06
+
+### Bugfixes
+
+- [#36](https://github.com/botfront/rasa-for-botfront/pull/38): Fix regression testing of forms.
+- [8af1c75](https://github.com/botfront/rasa-for-botfront/commit/8af1c75833eca4bd18683611e480926e638c705a): Fix training of outdated models.
+
+## [2.1.3-bf.4] - 2020-12-23
+
+### Features
+
+- [#36](https://github.com/botfront/rasa-for-botfront/pull/36): Add an input channel to which Botfront can POST chatbot regression tests.
+
+### Improvements
+
+- [#37](https://github.com/botfront/rasa-for-botfront/pull/37): Preparse nlu yaml to avoid ruamel performance issue.
+
+### Bugfixes
+
+- [78e397a](https://github.com/botfront/rasa-for-botfront/commit/78e397ad00ff7c25c3a8ea6fd21dc0cd15b90bcf): Train when old model is corrupted.
+
+## [2.1.3-bf.3] - 2020-12-16
+
+### Bugfixes
+
+- [b1ad997](https://github.com/botfront/rasa-for-botfront/commit/b1ad99753eff8dd914c5e1d0627f5aa1e5873c02): Temporarily fix bf forms by skipping Rasa form validation.
+
+## [2.1.3-bf.2] - 2020-12-15
+
+### Bugfixes
+
+- [6369098](https://github.com/botfront/rasa-for-botfront/commit/636909871736b3c3685143764f6a7f86bc1a1fd1): Fix bug where non-structured NLU data (e.g. synonyms) caused a crash.
+
+### Improvements
+
+- [a241685](https://github.com/botfront/rasa-for-botfront/commit/a2416856e5eeb7eca25c4f03aaa570cb52e465db): NLU data spec/styling: language as intent-level metadata, rest as example level.
+
+## [2.1.3-bf.1] - 2020-12-14
+
+### Misc
+
+- [c694727](https://github.com/botfront/rasa-for-botfront/commit/c694727bd4acca252f0716a5d58b8a9a1c2bdaf9): Rasa 2.0!
+
+## [1.10.16-bf.3] - 2020-11-25
+
+### Bugfixes
+
+- [#35](https://github.com/botfront/rasa-for-botfront/pull/35): Fix form submission, where exiting form with no SlotSet instruction caused a TypeError.
 
 ## [1.10.16-bf.2] - 2020-11-12
 
@@ -18,7 +130,7 @@ title: Rasa For Botfront Changelog
 
 ## [1.10.16-bf.1] - 2020-10-27
 
-## Improvements
+### Improvements
 
 - [#32](https://github.com/botfront/rasa-for-botfront/pull/32): Move graphql slot interpolation to Rasa.
 - [#29](https://github.com/botfront/rasa-for-botfront/pull/29): Add support for the augmentation factor in the train route.

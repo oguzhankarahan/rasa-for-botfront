@@ -47,7 +47,9 @@ class BotfrontFileImporter(TrainingDataImporter):
                 }
 
     def path_for_nlu_lang(self, lang) -> List[Text]:
-        return [x for x in self._nlu_files if "nlu/{}".format(lang) in x]
+        if len(self.nlu_config.keys()) < 2:
+            return self._nlu_files
+        return [x for x in self._nlu_files if f"nlu/{lang}" in x or f"nlu-{lang}" in x]
 
     async def get_config(self) -> Dict:
         return self.core_config
@@ -110,6 +112,6 @@ class BotfrontFileImporter(TrainingDataImporter):
             domain = Domain.load(self._domain_path)
             domain.check_missing_templates()
         except Exception as e:
-            logger.warning(e)
+            logger.error(e)
         finally:
             return domain
